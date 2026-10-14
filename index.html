@@ -1,0 +1,146 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Kanavilakku Online</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#111;color:#fff;font:14px system-ui}canvas{display:block}#hud{position:fixed;top:8px;left:8px;background:#0008;padding:6px 10px;border-radius:8px;line-height:1.5}#msg{position:fixed;bottom:24px;width:100%;text-align:center;font-size:20px;text-shadow:0 0 4px #000}#ov{position:fixed;inset:0;display:flex;flex-direction:column;gap:10px;align-items:center;justify-content:center;background:#000d}#ov input,#ov button{font-size:16px;padding:8px 14px}#att{position:fixed;bottom:2px;right:6px;font-size:10px;opacity:.7}canvas{touch-action:none}#touch{position:fixed;inset:0;pointer-events:none;z-index:5;display:none;user-select:none;-webkit-user-select:none}
+#joy{position:absolute;bottom:28px;left:28px;width:var(--joy,120px);height:var(--joy,120px);border-radius:50%;background:rgba(255,255,255,.15);border:2px solid #fff8;opacity:var(--op,.6);pointer-events:auto;touch-action:none}
+#knob{position:absolute;width:40%;height:40%;left:30%;top:30%;border-radius:50%;background:#fffc}
+#jump,#act{position:absolute;width:var(--btn,64px);height:var(--btn,64px);border-radius:50%;background:rgba(255,255,255,.25);border:2px solid #fff8;color:#fff;font-weight:700;opacity:var(--op,.6);pointer-events:auto;touch-action:none;display:flex;align-items:center;justify-content:center;right:28px}
+#jump{bottom:28px}#act{bottom:calc(42px + var(--btn,64px));display:none;background:rgba(46,139,87,.6)}
+.lefty #joy{left:auto;right:28px}.lefty #jump,.lefty #act{right:auto;left:28px}
+#gear{position:fixed;top:8px;right:8px;z-index:30;font-size:22px;background:#0008;border:0;border-radius:8px;color:#fff;padding:4px 10px}
+#set{position:fixed;top:48px;right:8px;z-index:30;background:#000e;padding:12px;border-radius:10px;max-height:75vh;overflow:auto;display:none;width:min(280px,80vw)}
+#set label{display:block;margin:8px 0 2px}#set input[type=range]{width:100%}#set button{margin-top:10px;padding:6px 12px}
+</style></head><body>
+<div id="ov"><h2>Kanavilakku, Theni — Online</h2><input id="nm" placeholder="Your name" maxlength="16"><label><input type="checkbox" id="sat" checked> Satellite ground</label><button id="go">Play</button><div id="st"></div><small>Phone: joystick + drag to look + JUMP · Keyboard: WASD move · Space jump · Shift run · drag/mouse look · E enter/exit buildings</small></div>
+<div id="hud"></div><div id="msg"></div>
+<div id="touch"><div id="joy"><div id="knob"></div></div><div id="jump">JUMP</div><div id="act">ENTER</div></div>
+<button id="gear">⚙️</button><div id="set"></div><div id="att">Map data © OpenStreetMap contributors · Imagery © Esri, Maxar, Earthstar Geographics</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),rad=Math.PI/180;
+const WS_URL=location.protocol.startsWith('http')?(location.protocol==='https:'?'wss://':'ws://')+location.host:null;
+const FALLBACK={lat:10.0104,lon:77.4768};
+const PUBLIC=['hospital','clinic','school','college','bank','place_of_worship','restaurant','cafe','pharmacy','police','post_office','marketplace','bus_station','library','townhall','fast_food','atm','kindergarten'];
+let origin,scene,cam,ren,city=new THREE.Group(),inter=new THREE.Group(),me={x:0,z:0,y:0,vy:0,p:.2,r:0,s:'street'},street={x:0,z:0},ws,myId=0,others=new Map(),blds=[],segs=[],keys={},jumpReq=false,jv=[0,0],playing=false,myAv,last=0,roadName='',nameT=0,roadMats=[];
+const proj=(lat,lon)=>[(lon-origin.lon)*Math.cos(origin.lat*rad)*111320,-(lat-origin.lat)*110574];
+function label(t,sc=1){const c=document.createElement('canvas');c.width=256;c.height=64;const g=c.getContext('2d');g.fillStyle='#000a';g.fillRect(0,0,256,64);g.fillStyle='#fff';g.font='bold 26px system-ui';g.textAlign='center';g.fillText(String(t).slice(0,18),128,42);const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c),depthTest:false}));s.scale.set(4*sc,sc,1);return s}
+function avatar(id){const g=new THREE.Group(),col=new THREE.Color().setHSL((id*.37)%1,.7,.5);const b=new THREE.Mesh(new THREE.CylinderGeometry(.35,.35,1.2,12),new THREE.MeshLambertMaterial({color:col}));b.position.y=.6;const h=new THREE.Mesh(new THREE.SphereGeometry(.28,12,12),new THREE.MeshLambertMaterial({color:0xf1c27d}));h.position.y=1.5;g.add(b,h);return g}
+function inPoly(p,x,z){let c=false;for(let i=0,j=p.length-1;i<p.length;j=i++){if((p[i][1]>z)!=(p[j][1]>z)&&x<(p[j][0]-p[i][0])*(z-p[i][1])/(p[j][1]-p[i][1])+p[i][0])c=!c}return c}
+function distPoly(p,x,z){let m=1e9;for(let i=0;i<p.length-1;i++){const[a,b]=[p[i],p[i+1]],dx=b[0]-a[0],dz=b[1]-a[1],L=dx*dx+dz*dz||1;let t=Math.max(0,Math.min(1,((x-a[0])*dx+(z-a[1])*dz)/L));m=Math.min(m,Math.hypot(x-a[0]-t*dx,z-a[1]-t*dz))}return m}
+
+async function boot(){
+ const st=$('st');st.textContent='Locating Kanavilakku…';
+ let c=FALLBACK;
+ try{const r=await(await fetch('https://nominatim.openstreetmap.org/search?q=Kanavilakku,Theni&format=json&limit=1')).json();if(r[0])c={lat:+r[0].lat,lon:+r[0].lon}}catch(e){}
+ origin=c;st.textContent='Loading roads & buildings…';
+ const a=`(around:450,${c.lat},${c.lon})`;
+ const q=`[out:json][timeout:40];(way["highway"]${a};way["building"]${a};node["amenity"]${a};node["shop"]${a};);out geom;`;
+ let els=[];
+ try{els=(await(await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q)})).json()).elements}catch(e){st.textContent='Map data failed to load — refresh to retry.';return}
+ scene=new THREE.Scene();scene.background=new THREE.Color(0x9fd0ff);scene.fog=new THREE.Fog(0x9fd0ff,150,600);
+ cam=new THREE.PerspectiveCamera(65,innerWidth/innerHeight,.1,1500);
+ ren=new THREE.WebGLRenderer({antialias:true});ren.setSize(innerWidth,innerHeight);document.body.prepend(ren.domElement);
+ scene.add(new THREE.AmbientLight(0xffffff,.7));const sun=new THREE.DirectionalLight(0xffffff,.6);sun.position.set(100,200,50);scene.add(sun);
+ scene.add(city,inter);ren.domElement.addEventListener('touchstart',e=>{for(const t of e.changedTouches)if(lookId===null){lookId=t.identifier;lx=t.clientX;ly=t.clientY}},{passive:true});inter.visible=false;
+ const gnd=new THREE.Mesh(new THREE.PlaneGeometry(4000,4000),new THREE.MeshLambertMaterial({color:0x6b8f4e}));gnd.rotation.x=-Math.PI/2;gnd.position.y=-.1;city.add(gnd);
+ const W={motorway:14,trunk:14,primary:12,secondary:10,tertiary:8,residential:6,service:4,footway:2,path:2};
+ const box=new THREE.BoxGeometry(1,.1,1),pois=[];
+ for(const e of els){
+  if(e.type==='node'){const[x,z]=proj(e.lat,e.lon);pois.push({x,z,t:e.tags||{}});continue}
+  if(!e.geometry)continue;const pts=e.geometry.map(g=>proj(g.lat,g.lon)),t=e.tags||{};
+  if(t.highway){const w=W[t.highway]||5,main=/madurai/i.test(t.name||''),mat=new THREE.MeshLambertMaterial({color:main?0x444455:0x555555});roadMats.push(mat);
+   for(let i=0;i<pts.length-1;i++){const[p,q2]=[pts[i],pts[i+1]],dx=q2[0]-p[0],dz=q2[1]-p[1],m=new THREE.Mesh(box,mat);m.scale.set(Math.hypot(dx,dz)+.5,1,w);m.position.set((p[0]+q2[0])/2,.05,(p[1]+q2[1])/2);m.rotation.y=-Math.atan2(dz,dx);city.add(m);segs.push({a:p,b:q2,n:t.name||t.highway})}}
+  else if(t.building&&pts.length>3){const xs=pts.map(p=>p[0]),zs=pts.map(p=>p[1]);blds.push({id:e.id,poly:pts,t,bb:[Math.min(...xs),Math.min(...zs),Math.max(...xs),Math.max(...zs)]})}
+ }
+ const cols=[0xd9c9a8,0xe8d5c4,0xc9b79c,0xb8c4d0,0xe0b9a0];
+ for(const b of blds){
+  for(const p of pois)if(inPoly(b.poly,p.x,p.z)){b.t={...b.t,...p.t}}
+  const t=b.t,am=t.amenity||'';b.pub=PUBLIC.includes(am)||!!t.shop||!!t.tourism||['school','hospital','temple','church','mosque','retail','commercial'].includes(t.building);
+  b.name=t.name||t['name:en']||am||t.shop||t.building;b.am=am||t.shop||t.building;
+  const h=(parseFloat(t['building:levels'])||2)*3.2,sh=new THREE.Shape(b.poly.map(p=>new THREE.Vector2(p[0],-p[1])));
+  const g=new THREE.ExtrudeGeometry(sh,{depth:h,bevelEnabled:false});g.rotateX(-Math.PI/2);
+  const m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({color:b.pub?0xffd27a:cols[b.id%cols.length]}));city.add(m);
+  if(b.pub){b.cx=(b.bb[0]+b.bb[2])/2;b.cz=(b.bb[1]+b.bb[3])/2;const s=label(b.name);s.position.set(b.cx,h+4,b.cz);s.scale.set(8,2,1);city.add(s)}
+ }
+ if($('sat').checked){st.textContent='Loading satellite imagery…';try{await satellite()}catch(e){console.warn(e)}}
+ myAv=avatar(0);myAv.add(Object.assign(label($('nm').value||'Me'),{position:new THREE.Vector3(0,2.6,0)}));scene.add(myAv);
+ connect();$('ov').style.display='none';playing=true;requestAnimationFrame(tick);
+}
+async function satellite(){
+ const z=18,n=2**z,d=.0045,tx=l=>Math.floor((l+180)/360*n),ty=l=>Math.floor((1-Math.log(Math.tan(l*rad)+1/Math.cos(l*rad))/Math.PI)/2*n);
+ const x0=tx(origin.lon-d),x1=tx(origin.lon+d),y0=ty(origin.lat+d),y1=ty(origin.lat-d);
+ const cv=document.createElement('canvas');cv.width=(x1-x0+1)*256;cv.height=(y1-y0+1)*256;const g=cv.getContext('2d');let ok=0,jobs=[];
+ for(let x=x0;x<=x1;x++)for(let y=y0;y<=y1;y++)jobs.push(new Promise(r=>{const i=new Image();i.crossOrigin='anonymous';i.onload=()=>{g.drawImage(i,(x-x0)*256,(y-y0)*256);ok++;r()};i.onerror=r;i.src=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`}));
+ await Promise.all(jobs);if(!ok)return;
+ const t2l=y=>Math.atan(Math.sinh(Math.PI*(1-2*y/n)))/rad,[wx,wz]=proj(t2l(y0),x0/n*360-180),[ex,ez]=proj(t2l(y1+1),(x1+1)/n*360-180);
+ const tex=new THREE.CanvasTexture(cv);tex.anisotropy=8;const m=new THREE.Mesh(new THREE.PlaneGeometry(ex-wx,ez-wz),new THREE.MeshBasicMaterial({map:tex}));
+ m.rotation.x=-Math.PI/2;m.position.set((wx+ex)/2,0,(wz+ez)/2);city.add(m);roadMats.forEach(r=>r.visible=false);
+}
+function connect(){
+ if(!WS_URL){$('hud').textContent='Offline (open via your server for multiplayer)';return}
+ ws=new WebSocket(WS_URL);
+ ws.onopen=()=>ws.send(JSON.stringify({t:'join',name:$('nm').value||'Guest'}));
+ ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.t==='init')myId=m.id;
+  else if(m.t==='s'){const seen=new Set();$('hud').dataset.n=m.p.length;
+   for(const[id,name,x,z,r,s,y]of m.p){if(id===myId)continue;seen.add(id);let o=others.get(id);
+    if(!o){o={m:avatar(id),x,z,r,y:0};const l=label(name);l.position.y=2.6;o.m.add(l);scene.add(o.m);others.set(id,o)}o.tx=x;o.tz=z;o.tr=r;o.ty=y;o.s=s}
+   for(const[id,o]of others)if(!seen.has(id)){scene.remove(o.m);others.delete(id)}}};
+ ws.onclose=()=>setTimeout(connect,2000);
+ setInterval(()=>ws.readyState===1&&ws.send(JSON.stringify({t:'p',x:me.x,z:me.z,y:me.y,r:me.r,s:me.s})),100);
+}
+function blocked(x,z){if(me.s!=='street')return Math.abs(x)>7.5||z<-5.5||z>5.6;
+ for(const b of blds){if(x<b.bb[0]||x>b.bb[2]||z<b.bb[1]||z>b.bb[3])continue;if(inPoly(b.poly,x,z))return true}return false}
+function nearB(){if(me.s!=='street')return null;let best=null,bd=5;for(const b of blds){if(!b.pub||me.x<b.bb[0]-5||me.x>b.bb[2]+5||me.z<b.bb[1]-5||me.z>b.bb[3]+5)continue;const d=distPoly(b.poly,me.x,me.z);if(d<bd){bd=d;best=b}}return best}
+function enter(b){street={x:me.x,z:me.z};me.s='b'+b.id;while(inter.children.length)inter.remove(inter.children[0]);
+ const mk=(w,h,d,x,y,z,c)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),new THREE.MeshLambertMaterial({color:c}));m.position.set(x,y,z);inter.add(m);return m};
+ const pal={hospital:0xe8f4f8,school:0xfff3c4,place_of_worship:0xf5e6d3,bank:0xdde7dd,restaurant:0xf3d9c4}[b.am]||0xeeeeee;
+ mk(16,.2,12,0,0,0,0x8a7a6a);mk(16,4,.3,0,2,-6,pal);mk(.3,4,12,-8,2,0,pal);mk(.3,4,12,8,2,0,pal);mk(16,4,.3,0,2,6,pal);mk(16,.2,12,0,4,0,0xffffff);
+ mk(2.4,3,.4,0,1.5,5.8,0x2e8b57);mk(8,1.1,1.2,0,.55,-3.5,0x6b4a2b);
+ for(let i=-1;i<=1;i+=2)mk(2,.8,2,i*4,.4,1,0x8b5a2b);
+ const s=label(b.name,1.5);s.position.set(0,3.2,-5.6);s.scale.set(10,2.5,1);inter.add(s);
+ const l=new THREE.PointLight(0xffffff,.8,30);l.position.set(0,3.5,0);inter.add(l);
+ city.visible=false;inter.visible=true;me.x=0;me.z=4;me.curB=b}
+function leave(){me.s='street';me.x=street.x;me.z=street.z;city.visible=true;inter.visible=false}
+function interact(){if(!playing)return;if(me.s==='street'){const b=nearB();if(b)enter(b)}else if(me.z>3.5)leave()}
+addEventListener('keydown',e=>{if(e.target.tagName==='INPUT')return;keys[e.code]=1;if(e.code==='KeyE')interact();if(e.code==='Space'){jumpReq=true;e.preventDefault()}});
+addEventListener('keyup',e=>keys[e.code]=0);
+addEventListener('mousemove',e=>{if(document.pointerLockElement||e.buttons){me.r-=e.movementX*.004*S.sens;me.p=Math.max(-.4,Math.min(.9,me.p+e.movementY*.003*S.sens*(S.inv?-1:1)))}});
+addEventListener('click',e=>{if(playing&&!('ontouchstart' in window)&&e.target===ren.domElement)ren.domElement.requestPointerLock()});
+addEventListener('resize',()=>{if(!ren)return;ren.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()});
+function tick(t){requestAnimationFrame(tick);const dt=Math.min(.05,(t-last)/1e3);last=t;
+ const f=[-Math.sin(me.r),-Math.cos(me.r)],rt=[Math.cos(me.r),-Math.sin(me.r)];
+ const fw=(keys.KeyW?1:0)-(keys.KeyS?1:0)-jv[1],sd=(keys.KeyD?1:0)-(keys.KeyA?1:0)+jv[0];
+ if(keys.ArrowLeft)me.r+=2*dt;if(keys.ArrowRight)me.r-=2*dt;
+ const mag=Math.min(1,Math.hypot(fw,sd)),jm=Math.hypot(jv[0],jv[1]),run=keys.ShiftLeft||(S.auto&&jm>.95),sp=(run?12:6)*mag*dt,L=Math.hypot(fw,sd)||1;
+ const mx=(f[0]*fw+rt[0]*sd)/L*sp,mz=(f[1]*fw+rt[1]*sd)/L*sp;
+ if(!blocked(me.x+mx,me.z))me.x+=mx;if(!blocked(me.x,me.z+mz))me.z+=mz;
+ if(jumpReq&&me.y<=.001)me.vy=7.5;jumpReq=false;me.vy-=22*dt;me.y+=me.vy*dt;if(me.y<0){me.y=0;me.vy=0}
+ myAv.position.set(me.x,me.y,me.z);myAv.rotation.y=me.r;
+ cam.position.set(me.x+Math.sin(me.r)*S.cam,Math.max(.8,2.4+me.p*S.cam*.8+me.y*.6),me.z+Math.cos(me.r)*S.cam);if(me.s!=='street')cam.position.z=Math.min(cam.position.z,5.8),cam.position.x=Math.max(-7.5,Math.min(7.5,cam.position.x));cam.lookAt(me.x,me.y*.6+1.6,me.z);
+ for(const o of others.values()){o.m.visible=o.s===me.s;o.x+=(o.tx-o.x)*.2;o.z+=(o.tz-o.z)*.2;o.y+=((o.ty||0)-o.y)*.3;o.m.position.set(o.x,o.y,o.z);o.m.rotation.y=o.tr}
+ if(t-nameT>500){nameT=t;if(me.s==='street'){let b=1e9;for(const s of segs){const dx=s.b[0]-s.a[0],dz=s.b[1]-s.a[1],q=Math.max(0,Math.min(1,((me.x-s.a[0])*dx+(me.z-s.a[1])*dz)/(dx*dx+dz*dz||1))),d=Math.hypot(me.x-s.a[0]-q*dx,me.z-s.a[1]-q*dz);if(d<b){b=d;roadName=s.n}}}
+  $('hud').innerHTML=`📍 ${me.s==='street'?roadName:me.curB.name}<br>👥 ${+$('hud').dataset.n||1} online`}
+ const nb=nearB();$('msg').textContent=me.s==='street'?(nb?`Press E to enter ${nb.name}`:''):(me.z>3.5?'Press E to exit':'');
+ $('act').style.display=$('msg').textContent?'flex':'none';ren.render(scene,cam)}
+/* settings & touch */
+const DEF={sens:1,joy:120,btn:64,op:.6,cam:6,lefty:false,inv:false,auto:true,touch:('ontouchstart' in window)};
+let S={...DEF},lookId=null,joyId=null,lx=0,ly=0;
+try{Object.assign(S,JSON.parse(localStorage.getItem('kv')||'{}'))}catch(e){}
+const OPTS=[['sens','Look sensitivity',.3,3,.1],['joy','Joystick size',80,200,5],['btn','Button size',48,100,2],['op','Control opacity',.2,1,.05],['cam','Camera distance',3,12,.5]];
+const TOG=[['touch','Show touch controls'],['lefty','Left-handed layout'],['inv','Invert look Y'],['auto','Auto-run at full joystick push']];
+function applyUI(){const r=document.documentElement.style;r.setProperty('--joy',S.joy+'px');r.setProperty('--btn',S.btn+'px');r.setProperty('--op',S.op);
+ $('touch').style.display=S.touch?'block':'none';$('touch').className=S.lefty?'lefty':'';try{localStorage.setItem('kv',JSON.stringify(S))}catch(e){}}
+function buildSet(){$('set').innerHTML='<b>Controls</b>'+OPTS.map(o=>`<label>${o[1]}: <span id="v_${o[0]}">${S[o[0]]}</span></label><input type="range" data-k="${o[0]}" min="${o[2]}" max="${o[3]}" step="${o[4]}" value="${S[o[0]]}">`).join('')+TOG.map(o=>`<label><input type="checkbox" data-t="${o[0]}" ${S[o[0]]?'checked':''}> ${o[1]}</label>`).join('')+'<button id="rst">Reset to default</button>';
+ $('set').querySelectorAll('[data-k]').forEach(i=>i.oninput=()=>{S[i.dataset.k]=+i.value;$('v_'+i.dataset.k).textContent=i.value;applyUI()});
+ $('set').querySelectorAll('[data-t]').forEach(i=>i.onchange=()=>{S[i.dataset.t]=i.checked;applyUI()});
+ $('rst').onclick=()=>{S={...DEF};applyUI();buildSet()}}
+$('gear').onclick=()=>{const s=$('set');s.style.display=s.style.display==='block'?'none':'block'};
+function joyMove(t){const b=$('joy').getBoundingClientRect(),R=b.width/2,dx=t.clientX-b.left-R,dy=t.clientY-b.top-R,d=Math.hypot(dx,dy),k=d>R?R/d:1;jv=[dx*k/R,dy*k/R];$('knob').style.transform=`translate(${dx*k}px,${dy*k}px)`}
+$('joy').addEventListener('touchstart',e=>{e.preventDefault();joyId=e.changedTouches[0].identifier;joyMove(e.changedTouches[0])},{passive:false});
+addEventListener('touchmove',e=>{for(const t of e.changedTouches){if(t.identifier===joyId){joyMove(t);e.preventDefault()}else if(t.identifier===lookId){me.r-=(t.clientX-lx)*.006*S.sens;me.p=Math.max(-.4,Math.min(.9,me.p+(t.clientY-ly)*.004*S.sens*(S.inv?-1:1)));lx=t.clientX;ly=t.clientY}}},{passive:false});
+const tend=e=>{for(const t of e.changedTouches){if(t.identifier===joyId){joyId=null;jv=[0,0];$('knob').style.transform=''}if(t.identifier===lookId)lookId=null}};
+addEventListener('touchend',tend);addEventListener('touchcancel',tend);
+$('jump').addEventListener('touchstart',e=>{e.preventDefault();jumpReq=true},{passive:false});
+$('act').addEventListener('touchstart',e=>{e.preventDefault();interact()},{passive:false});
+$('act').onclick=interact;
+buildSet();applyUI();
+$('go').onclick=()=>{$('go').disabled=true;boot()};
+</script></body></html>
