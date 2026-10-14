@@ -31,10 +31,16 @@ async function boot(){
  let c=FALLBACK;
  try{const r=await(await fetch('https://nominatim.openstreetmap.org/search?q=Kanavilakku,Theni&format=json&limit=1')).json();if(r[0])c={lat:+r[0].lat,lon:+r[0].lon}}catch(e){}
  origin=c;st.textContent='Loading roads & buildings…';
- const a=`(around:450,${c.lat},${c.lon})`;
- const q=`[out:json][timeout:40];(way["highway"]${a};way["building"]${a};node["amenity"]${a};node["shop"]${a};);out geom;`;
- let els=[];
- try{els=(await(await fetch('https://overpass-api.de/api/interpreter',{method:'POST',body:'data='+encodeURIComponent(q)})).json()).elements}catch(e){st.textContent='Map data failed to load — refresh to retry.';return}
+ const MIRRORS=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter','https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
+ let els=null,err='';
+ for(const rad of [450,300]){for(const u of MIRRORS){
+  st.textContent=`Loading roads & buildings… (${new URL(u).hostname}, ${rad}m)`;
+  try{const a=`(around:${rad},${c.lat},${c.lon})`,q=`[out:json][timeout:25];(way["highway"]${a};way["building"]${a};node["amenity"]${a};node["shop"]${a};);out geom;`;
+   const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),30000);
+   const r=await fetch(u,{method:'POST',body:'data='+encodeURIComponent(q),signal:ac.signal});clearTimeout(tm);
+   if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();if(j.elements&&j.elements.length){els=j.elements;break}throw new Error('empty')}catch(e){err=e.message}}
+  if(els)break}
+ if(!els){st.textContent='Map data failed to load ('+err+'). Tap Play to retry.';$('go').disabled=false;return}
  scene=new THREE.Scene();scene.background=new THREE.Color(0x9fd0ff);scene.fog=new THREE.Fog(0x9fd0ff,150,600);
  cam=new THREE.PerspectiveCamera(65,innerWidth/innerHeight,.1,1500);
  ren=new THREE.WebGLRenderer({antialias:true});ren.setSize(innerWidth,innerHeight);document.body.prepend(ren.domElement);
